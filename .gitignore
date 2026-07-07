@@ -1,0 +1,25 @@
+# --- Python / backend ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+venv/
+.venv/
+env/
+*.db
+*.sqlite3
+
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+!.env.docker.example
+# --- Frontend (once it exists) ---
+node_modules/
+dist/
+build/
+.vite/
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+*.log

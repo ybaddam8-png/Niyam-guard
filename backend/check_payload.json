@@ -1,0 +1,22 @@
+{
+  "rule": {
+    "clause_id": "1fc3a0bb9b66",
+    "field_name": "Last date for submission of applications",
+    "old_value": "",
+    "new_value": "30th September 2025",
+    "effective_date": null,
+    "source_sentence": "The last date for submission of applications by the selected meritorious students on the National Scholarship Portal (NSP) for National Means cum Merit Scholarship Scheme (NMMSS) for the year 2025-26 has been extended to 30th September 2025.",
+    "confidence": "low",
+    "confidence_reason": "The previous last date for submission is not explicitly mentioned, only that it 'has been extended'."
+  },
+  "systems": [
+    {
+      "system_id": "nsp-portal-faq",
+      "system_type": "portal",
+      "display_name": "NSP Portal FAQ (illustrative — real text not sourced yet)",
+      "current_text": "Applications must be submitted by 31st August 2025.",
+      "source_url": null,
+      "is_illustrative": true
+    }
+  ]
+}
