@@ -3,6 +3,7 @@ Step 1 of the pipeline (doc section 3, step 2): "The system understands what act
 Takes raw circular text (already OCR'd/extracted from PDF) and returns structured RuleDelta objects.
 """
 import hashlib
+from datetime import date
 from typing import List
 from app.llm_client import call_llm, extract_json
 from app.schemas import RuleDelta, ConfidenceLevel
@@ -23,9 +24,14 @@ Rules:
   briefly state what made it unambiguous (e.g. "explicit old and new values stated for both groups").
 - If the circular is in a regional language, extract and translate field_name/values to English
   but keep source_sentence in the ORIGINAL language exactly as written.
+- In addition to "effective_date" (free text), also output "effective_date_iso" as a strict
+  YYYY-MM-DD date, but ONLY when the circular states one unambiguous, specific date (e.g.
+  "1st April 2026"). If it says something vague ("with immediate effect", "forthwith") or states
+  no date at all, output effective_date_iso as an empty string "" — do NOT guess or approximate a date.
 - Output ONLY a JSON array, no prose, no markdown fences. Each element:
   {"field_name": str, "old_value": str, "new_value": str, "effective_date": str or "",
-   "source_sentence": str, "confidence": "high"|"medium"|"low", "confidence_reason": str}
+   "effective_date_iso": str (YYYY-MM-DD) or "", "source_sentence": str,
+   "confidence": "high"|"medium"|"low", "confidence_reason": str}
 - If no rule changes are found, output an empty JSON array: []
 """
 
@@ -53,6 +59,16 @@ def extract_rule_deltas(circular_text: str) -> List[RuleDelta]:
         # of the identical fact idempotent while giving distinct facts distinct ids.
         fact_key = f"{item['field_name']}|{item.get('old_value','')}|{item['new_value']}|{item['source_sentence']}"
         clause_id = hashlib.sha256(fact_key.encode("utf-8")).hexdigest()[:16]
+        raw_iso = (item.get("effective_date_iso") or "").strip()
+        parsed_iso_date = None
+        if raw_iso:
+            try:
+                parsed_iso_date = date.fromisoformat(raw_iso)
+            except ValueError:
+                # LLM produced something that isn't a real YYYY-MM-DD date. Never guess a
+                # correction — leave it null, same "don't fill gaps" rule as everything else here.
+                parsed_iso_date = None
+
         deltas.append(
             RuleDelta(
                 clause_id=clause_id,
@@ -60,6 +76,7 @@ def extract_rule_deltas(circular_text: str) -> List[RuleDelta]:
                 old_value=item.get("old_value", ""),
                 new_value=item["new_value"],
                 effective_date=item.get("effective_date") or None,
+                effective_date_iso=parsed_iso_date,
                 source_sentence=item["source_sentence"],
                 confidence=ConfidenceLevel(item["confidence"]),
                 confidence_reason=item["confidence_reason"],

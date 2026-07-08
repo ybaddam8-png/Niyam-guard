@@ -3,7 +3,7 @@ Pydantic models shared across the pipeline.
 These are the actual data contracts between extraction -> diffing -> graph -> audit -> API.
 """
 from __future__ import annotations
-from datetime import datetime
+from datetime import datetime, date
 from enum import Enum
 from typing import Optional
 from pydantic import BaseModel, Field
@@ -22,6 +22,11 @@ class RuleDelta(BaseModel):
     old_value: str
     new_value: str
     effective_date: Optional[str] = Field(None, description="ISO date string if stated, else null")
+    effective_date_iso: Optional[date] = Field(
+        None, description="Strict machine-parsable date this rule takes effect. Set ONLY when the "
+                           "circular states an unambiguous date AND it parses cleanly. Null for vague "
+                           "phrasing ('immediate effect') or anything unparsable — never guessed."
+    )
     source_sentence: str = Field(..., description="Verbatim sentence from the circular this was extracted from")
     confidence: ConfidenceLevel
     confidence_reason: str = Field(..., description="Why this confidence level was assigned")

@@ -6,6 +6,7 @@ viewer < reviewer < admin (see app/auth.py).
 import json
 import logging
 from collections import defaultdict
+from datetime import datetime
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -20,12 +21,13 @@ import networkx as nx
 
 from app import config, pdf_utils, audit_service
 from app.db import get_db
-from app.models import User, Circular, RuleDeltaRecord, DependentSystemRecord, MismatchFlagRecord, ApprovalRecord
+from app.models import User, Circular, RuleDeltaRecord, DependentSystemRecord, MismatchFlagRecord, ApprovalRecord, RuleConflictRecord
 from app.auth import get_current_user, require_role
 from app.security import verify_password, create_access_token
 from app.extraction import extract_rule_deltas
 from app.diffing import make_redline_html, similarity_ratio
 from app.graph import build_dependency_graph, trace_ripple, citizen_impact_score
+from app.conflict_detection import detect_conflicts_for_new_rule
 from app.schemas import RuleDelta, DependentSystem, MismatchFlag, SyncStatus
 from app.llm_client import LLMError
 from app.logging_config import configure_logging, RequestIdMiddleware, get_request_id
@@ -140,12 +142,13 @@ class ExtractTextRequest(BaseModel):
     circular_text: str
 
 
-def _persist_deltas(db: Session, circular: Circular, deltas: List[RuleDelta]) -> None:
+def _persist_deltas(db: Session, circular: Circular, deltas: List[RuleDelta], user: User) -> None:
+    new_rows: List[RuleDeltaRecord] = []
     for d in deltas:
         existing = db.query(RuleDeltaRecord).filter(RuleDeltaRecord.id == d.clause_id).first()
         if existing:
             continue
-        db.add(RuleDeltaRecord(
+        row = RuleDeltaRecord(
             id=d.clause_id,
             circular_id=circular.id if circular else None,
             clause_id=d.clause_id,
@@ -153,16 +156,30 @@ def _persist_deltas(db: Session, circular: Circular, deltas: List[RuleDelta]) ->
             old_value=d.old_value,
             new_value=d.new_value,
             effective_date=d.effective_date,
+            parsed_effective_date=d.effective_date_iso,
             source_sentence=d.source_sentence,
             confidence=d.confidence.value,
             confidence_reason=d.confidence_reason,
-        ))
+        )
+        db.add(row)
         try:
             db.flush()
         except IntegrityError:
             db.rollback()
             continue
+        new_rows.append(row)
     db.commit()
+
+    for row in new_rows:
+        conflicts = detect_conflicts_for_new_rule(db, row)
+        for c in conflicts:
+            audit_service.log_action(
+                db, action="conflict_detected", actor_user_id=user.id, actor_label=user.username,
+                payload=json.dumps({
+                    "field_name": c.field_name, "rule_a_id": c.rule_a_id, "rule_b_id": c.rule_b_id,
+                    "resolution": c.resolution, "governing_rule_id": c.governing_rule_id,
+                }),
+            )
 
 
 @app.post("/circulars/extract", response_model=List[RuleDelta])
@@ -182,7 +199,7 @@ def extract_from_text(
     db.add(circular)
     db.commit()
     db.refresh(circular)
-    _persist_deltas(db, circular, deltas)
+    _persist_deltas(db, circular, deltas, user)
 
     audit_service.log_action(
         db, action="circular_extracted", actor_user_id=user.id, actor_label=user.username,
@@ -213,7 +230,7 @@ async def extract_from_pdf(
     db.add(circular)
     db.commit()
     db.refresh(circular)
-    _persist_deltas(db, circular, deltas)
+    _persist_deltas(db, circular, deltas, user)
 
     audit_service.log_action(
         db, action="circular_extracted", actor_user_id=user.id, actor_label=user.username,
@@ -264,11 +281,20 @@ def check_systems(
         rule_row = RuleDeltaRecord(
             id=req.rule.clause_id, circular_id=None, clause_id=req.rule.clause_id,
             field_name=req.rule.field_name, old_value=req.rule.old_value, new_value=req.rule.new_value,
-            effective_date=req.rule.effective_date, source_sentence=req.rule.source_sentence,
+            effective_date=req.rule.effective_date, parsed_effective_date=req.rule.effective_date_iso,
+            source_sentence=req.rule.source_sentence,
             confidence=req.rule.confidence.value, confidence_reason=req.rule.confidence_reason,
         )
         db.add(rule_row)
         db.commit()
+        for c in detect_conflicts_for_new_rule(db, rule_row):
+            audit_service.log_action(
+                db, action="conflict_detected", actor_user_id=user.id, actor_label=user.username,
+                payload=json.dumps({
+                    "field_name": c.field_name, "rule_a_id": c.rule_a_id, "rule_b_id": c.rule_b_id,
+                    "resolution": c.resolution, "governing_rule_id": c.governing_rule_id,
+                }),
+            )
 
     for s in req.systems:
         _persist_system(db, s)
@@ -319,6 +345,37 @@ def check_systems(
 
     flags.sort(key=lambda f: f.citizen_impact_score, reverse=True)
     return CheckResponse(flags=flags, ripple=[r.model_dump() for r in ripple])
+
+
+# ---------------------------------------------------------------------------
+# Conflict Detection Across Circulars (viewer or above) — which rule currently governs
+# ---------------------------------------------------------------------------
+class ConflictResponse(BaseModel):
+    id: str
+    field_name: str
+    rule_a_id: str
+    rule_b_id: str
+    governing_rule_id: Optional[str]
+    resolution: str
+    resolution_reason: str
+    detected_at: datetime
+
+
+@app.get("/conflicts", response_model=List[ConflictResponse],
+         dependencies=[Depends(require_role("viewer"))])
+def list_conflicts(field_name: Optional[str] = None, db: Session = Depends(get_db)):
+    query = db.query(RuleConflictRecord)
+    if field_name:
+        query = query.filter(RuleConflictRecord.field_name == field_name)
+    rows = query.order_by(RuleConflictRecord.detected_at.desc()).all()
+    return [
+        ConflictResponse(
+            id=r.id, field_name=r.field_name, rule_a_id=r.rule_a_id, rule_b_id=r.rule_b_id,
+            governing_rule_id=r.governing_rule_id, resolution=r.resolution,
+            resolution_reason=r.resolution_reason, detected_at=r.detected_at,
+        )
+        for r in rows
+    ]
 
 
 # ---------------------------------------------------------------------------
