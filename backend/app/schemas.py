@@ -44,6 +44,11 @@ class DependentSystem(BaseModel):
     is_illustrative: bool = Field(
         False, description="True if this system's data is a stand-in (no public source exists), must be disclosed"
     )
+    scheme_id: Optional[str] = Field(None, description="Which scheme/policy area this system belongs to")
+    entity_label: Optional[str] = Field(
+        None, description="Which entity/region/office this instance represents, e.g. 'District: Warangal'. "
+                           "Systems with no entity_label are grouped as one default entity."
+    )
 
 
 class SyncStatus(str, Enum):

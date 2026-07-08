@@ -5,6 +5,7 @@ viewer < reviewer < admin (see app/auth.py).
 """
 import json
 import logging
+from collections import defaultdict
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, UploadFile, File, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -241,10 +242,13 @@ def _persist_system(db: Session, s: DependentSystem) -> DependentSystemRecord:
         row.current_text = s.current_text
         row.display_name = s.display_name
         row.is_illustrative = s.is_illustrative
+        row.scheme_id = s.scheme_id
+        row.entity_label = s.entity_label
     else:
         row = DependentSystemRecord(
             id=s.system_id, system_type=s.system_type.value, display_name=s.display_name,
             current_text=s.current_text, source_url=s.source_url, is_illustrative=s.is_illustrative,
+            scheme_id=s.scheme_id, entity_label=s.entity_label,
         )
         db.add(row)
     db.commit()
@@ -269,8 +273,7 @@ def check_systems(
     for s in req.systems:
         _persist_system(db, s)
 
-    system_ids_by_type = {s.system_type.value: s.system_id for s in req.systems}
-    graph = build_dependency_graph(system_ids_by_type)
+    graph = build_dependency_graph(req.systems)
 
     statuses: dict[str, SyncStatus] = {}
     for system in req.systems:
@@ -316,6 +319,69 @@ def check_systems(
 
     flags.sort(key=lambda f: f.citizen_impact_score, reverse=True)
     return CheckResponse(flags=flags, ripple=[r.model_dump() for r in ripple])
+
+
+# ---------------------------------------------------------------------------
+# Scale View (viewer or above) — same rule, many entities: which are lagging
+# ---------------------------------------------------------------------------
+class ScaleViewEntity(BaseModel):
+    entity_label: str
+    systems_checked: int
+    systems_out_of_sync: int
+    worst_status: SyncStatus
+    max_citizen_impact_score: int
+
+
+class ScaleViewResponse(BaseModel):
+    rule_id: str
+    field_name: str
+    total_entities: int
+    entities_with_issues: int
+    entities: List[ScaleViewEntity]
+
+
+_STATUS_SEVERITY = {SyncStatus.IN_SYNC: 0, SyncStatus.NEEDS_REVIEW: 1, SyncStatus.OUT_OF_SYNC: 2}
+
+
+@app.get("/scale-view/{rule_id}", response_model=ScaleViewResponse,
+         dependencies=[Depends(require_role("viewer"))])
+def scale_view(rule_id: str, db: Session = Depends(get_db)):
+    rule_row = db.query(RuleDeltaRecord).filter(RuleDeltaRecord.id == rule_id).first()
+    if not rule_row:
+        raise HTTPException(status_code=404, detail="rule not found")
+
+    rows = (
+        db.query(MismatchFlagRecord, DependentSystemRecord)
+        .join(DependentSystemRecord, MismatchFlagRecord.system_id == DependentSystemRecord.id)
+        .filter(MismatchFlagRecord.rule_id == rule_id)
+        .all()
+    )
+
+    by_entity: dict[str, list] = defaultdict(list)
+    for flag, system in rows:
+        by_entity[system.entity_label or "unassigned"].append((flag, system))
+
+    entities: List[ScaleViewEntity] = []
+    for entity_label, entity_rows in by_entity.items():
+        statuses = [SyncStatus(f.status) for f, s in entity_rows]
+        worst = max(statuses, key=lambda st: _STATUS_SEVERITY[st])
+        entities.append(ScaleViewEntity(
+            entity_label=entity_label,
+            systems_checked=len(entity_rows),
+            systems_out_of_sync=sum(1 for st in statuses if st == SyncStatus.OUT_OF_SYNC),
+            worst_status=worst,
+            max_citizen_impact_score=max(f.citizen_impact_score for f, s in entity_rows),
+        ))
+
+    entities.sort(key=lambda e: e.max_citizen_impact_score, reverse=True)
+
+    return ScaleViewResponse(
+        rule_id=rule_id,
+        field_name=rule_row.field_name,
+        total_entities=len(entities),
+        entities_with_issues=sum(1 for e in entities if e.systems_out_of_sync > 0),
+        entities=entities,
+    )
 
 
 # ---------------------------------------------------------------------------

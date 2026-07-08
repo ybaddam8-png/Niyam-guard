@@ -2,14 +2,19 @@
 Doc feature: 'Impact-ripple tracing — follows the dependency chain: if the portal is
 out of sync, everything downstream ... is automatically flagged as at-risk'.
 
-The graph is deliberately simple for the MVP: a fixed 4-node chain
-  portal -> officer_sop -> form -> citizen_notification
-because that's the real dependency order described in the pitch (portal is the source
-of truth; the officer's SOP references it; the form encodes it; the notification tells
-the citizen). Real deployments would build this graph per-scheme instead of hardcoding it,
-which is called out explicitly in Constraints below.
+Doc feature: 'Scale View — checking many connected entities at once (multiple district
+offices, multiple portal instances, multiple form versions), surfacing which specific
+locations are lagging, not just a single generic status.'
+
+The dependency order itself (portal -> sop -> form -> notification) is still fixed, per
+the pitch. What's no longer hardcoded is how many of these chains exist per check:
+systems are grouped by entity_label (e.g. "District: Warangal"), and one independent
+chain is built per entity, so a single rule check can span many entities/portal
+instances at once. Systems with no entity_label fall into one default entity, so the
+original single-chain MVP shape still works unchanged.
 """
 import networkx as nx
+from collections import defaultdict
 from typing import Dict, List
 from app.schemas import DependentSystem, SyncStatus, RippleNode
 
@@ -19,23 +24,34 @@ DEFAULT_DEPENDENCY_CHAIN = [
     ("form", "notification"),
 ]
 
+DEFAULT_ENTITY_LABEL = "__default__"
 
-def build_dependency_graph(system_ids_by_type: Dict[str, str]) -> nx.DiGraph:
-    """system_ids_by_type maps system_type ('portal','sop','form','notification') -> system_id
-    for the systems actually present in this check (MVP may only have 1-2 of the 4)."""
+
+def build_dependency_graph(systems: List[DependentSystem]) -> nx.DiGraph:
+    """Builds one dependency chain per entity_label, merged into a single graph.
+    Edges only ever connect systems within the same entity, so ripple tracing for
+    one district never bleeds into another."""
+    by_entity: Dict[str, Dict[str, str]] = defaultdict(dict)
+    for s in systems:
+        entity = s.entity_label or DEFAULT_ENTITY_LABEL
+        by_entity[entity][s.system_type.value] = s.system_id
+
     g = nx.DiGraph()
-    for sys_type, sys_id in system_ids_by_type.items():
-        g.add_node(sys_id, system_type=sys_type)
-    for parent_type, child_type in DEFAULT_DEPENDENCY_CHAIN:
-        if parent_type in system_ids_by_type and child_type in system_ids_by_type:
-            g.add_edge(system_ids_by_type[parent_type], system_ids_by_type[child_type])
+    for s in systems:
+        g.add_node(s.system_id, system_type=s.system_type.value, entity_label=s.entity_label)
+
+    for system_ids_by_type in by_entity.values():
+        for parent_type, child_type in DEFAULT_DEPENDENCY_CHAIN:
+            if parent_type in system_ids_by_type and child_type in system_ids_by_type:
+                g.add_edge(system_ids_by_type[parent_type], system_ids_by_type[child_type])
     return g
 
 
 def trace_ripple(g: nx.DiGraph, out_of_sync_system_ids: List[str]) -> List[RippleNode]:
-    """Every node reachable (downstream) from an out-of-sync node is at-risk,
-    even if that node's own text technically matches the rule — because it depends
-    on an upstream system that's already wrong."""
+    """Every node reachable (downstream) from an out-of-sync node is at-risk, even if
+    its own text technically matches — it depends on an upstream system that's already
+    wrong. Descendants stay scoped per-entity automatically since cross-entity edges
+    are never created."""
     at_risk_ids = set()
     reasons: Dict[str, str] = {}
     for start in out_of_sync_system_ids:
@@ -56,14 +72,12 @@ def trace_ripple(g: nx.DiGraph, out_of_sync_system_ids: List[str]) -> List[Rippl
     return nodes
 
 
-# Weights are intentionally simple and OPEN (doc feature: "transparent priority formula
-# ... shown openly, not hidden inside a black-box score"). Tune per-deployment.
 IMPACT_WEIGHTS = {
     SyncStatus.OUT_OF_SYNC: 40,
     SyncStatus.NEEDS_REVIEW: 15,
     SyncStatus.IN_SYNC: 0,
 }
-DOWNSTREAM_SYSTEM_BONUS = 15  # per at-risk downstream system, capped below
+DOWNSTREAM_SYSTEM_BONUS = 15
 
 
 def citizen_impact_score(status: SyncStatus, downstream_at_risk_count: int) -> tuple[int, str]:

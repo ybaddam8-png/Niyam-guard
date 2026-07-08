@@ -79,6 +79,8 @@ class DependentSystemRecord(Base):
     current_text = Column(Text, nullable=False)
     source_url = Column(String, nullable=True)
     is_illustrative = Column(Boolean, nullable=False, default=False)
+    scheme_id = Column(String, nullable=True)
+    entity_label = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), default=utcnow)
 
     __table_args__ = (
