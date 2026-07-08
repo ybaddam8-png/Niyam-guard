@@ -14,7 +14,7 @@ Real relational schema. Design notes:
 import uuid
 from datetime import datetime, timezone
 from sqlalchemy import (
-    Column, String, Text, Integer, Boolean, DateTime, ForeignKey, CheckConstraint
+    Column, String, Text, Integer, Boolean, DateTime, Date, ForeignKey, CheckConstraint
 )
 from sqlalchemy.orm import relationship
 from app.db import Base
@@ -62,6 +62,7 @@ class RuleDeltaRecord(Base):
     old_value = Column(Text, nullable=False)
     new_value = Column(Text, nullable=False)
     effective_date = Column(String, nullable=True)
+    parsed_effective_date = Column(Date, nullable=True)
     source_sentence = Column(Text, nullable=False)
     confidence = Column(String, nullable=False)
     confidence_reason = Column(Text, nullable=False)
@@ -136,3 +137,34 @@ class AuditLogEntry(Base):
     payload_hash = Column(String, nullable=False)
     prev_hash = Column(String, nullable=False)
     timestamp = Column(DateTime(timezone=True), default=utcnow)
+
+
+class RuleConflictRecord(Base):
+    """Doc feature: 'Conflict Detection Across Circulars — where two circulars affect
+    the same rule with different effective dates, identify which currently supersedes
+    the other, and flag downstream systems following neither correctly.'
+
+    Persisted (not just computed on request) so a detected conflict shows up in the
+    audit trail like every other finding this platform makes, instead of disappearing
+    once the API response is sent.
+    """
+    __tablename__ = "rule_conflicts"
+    id = Column(String, primary_key=True, default=gen_uuid)
+    field_name = Column(String, nullable=False)
+    rule_a_id = Column(String, ForeignKey("rule_deltas.id"), nullable=False)
+    rule_b_id = Column(String, ForeignKey("rule_deltas.id"), nullable=False)
+    governing_rule_id = Column(String, ForeignKey("rule_deltas.id"), nullable=True)
+    resolution = Column(String, nullable=False)
+    resolution_reason = Column(Text, nullable=False)
+    detected_at = Column(DateTime(timezone=True), default=utcnow)
+
+    rule_a = relationship("RuleDeltaRecord", foreign_keys=[rule_a_id])
+    rule_b = relationship("RuleDeltaRecord", foreign_keys=[rule_b_id])
+    governing_rule = relationship("RuleDeltaRecord", foreign_keys=[governing_rule_id])
+
+    __table_args__ = (
+        CheckConstraint(
+            "resolution IN ('a_governs', 'b_governs', 'ambiguous_missing_date', 'both_future')",
+            name="valid_conflict_resolution",
+        ),
+    )
