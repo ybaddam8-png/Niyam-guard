@@ -7,7 +7,7 @@ import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-os.environ["DATABASE_URL"] = "postgresql://postgres:niyamguard_dev@localhost:5432/niyamguard"
+os.environ["DATABASE_URL"] = "postgresql://postgres:changeme_docker_pg_password@localhost:5432/niyamguard_test"
 os.environ["JWT_SECRET_KEY"] = "test-signing-key-do-not-use-in-real-deployment"
 os.environ["ALLOWED_ORIGINS"] = "http://localhost:5173"
 os.environ["EXTRACTION_RATE_LIMIT"] = "2/minute"  # low, so we can actually trigger it in-test
